@@ -38,15 +38,6 @@ final class AppModel {
         if AudioCapturePermission.status() != .granted {
             Task { _ = await AudioCapturePermission.request() }
         }
-        // For scripted testing: EARSHOT_AUTORECORD=<seconds> records on launch, then stops.
-        if let s = ProcessInfo.processInfo.environment["EARSHOT_AUTORECORD"], let secs = Double(s) {
-            Task {
-                try? await Task.sleep(for: .seconds(1))
-                startRecording()
-                try? await Task.sleep(for: .seconds(secs))
-                stopRecording()
-            }
-        }
     }
 
     func toggleRecording() {
@@ -62,7 +53,13 @@ final class AppModel {
                          openSettings: true)
         case .unknown:
             Task {
-                if await AudioCapturePermission.request() { startRecording() }
+                if await AudioCapturePermission.request() {
+                    startRecording()
+                } else {
+                    alert("Earshot needs permission to record app audio",
+                          "Allow Earshot under System Settings → Privacy & Security → Screen & System Audio Recording → System Audio Recording Only, then press Record again.",
+                          openSettings: true)
+                }
             }
             return
         }
@@ -81,7 +78,10 @@ final class AppModel {
         recorder.stop()
         currentURL = nil
         lastRecording = url
-        if !heard {
+        if let error = recorder.writeError {
+            alert("Part of the recording couldn't be saved",
+                  "\(url.lastPathComponent) may be incomplete. \(error.localizedDescription)")
+        } else if !heard {
             alert("That recording is silent",
                   "Nothing played from \(source.label) while recording. If something did play, check that Earshot is allowed under System Audio Recording Only.",
                   openSettings: true)

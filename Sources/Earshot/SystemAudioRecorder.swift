@@ -1,6 +1,9 @@
 import AVFoundation
 import CoreAudio
 import Observation
+import os
+
+private let log = Logger(subsystem: "com.tigrank.earshot", category: "capture")
 
 /// What to record: one app, or every app's audio mixed together. Never the microphone.
 enum CaptureSource: Hashable {
@@ -15,9 +18,9 @@ enum CaptureSource: Hashable {
     }
 }
 
-/// Records whatever is playing through the Mac's output using a Core Audio process tap
-/// (macOS 14.2+). The tap does not mute anything: you keep hearing the audio normally.
-/// The first time it runs, macOS asks for "System Audio Recording" permission.
+/// Records what apps are playing using a Core Audio process tap. The tap doesn't mute
+/// anything: you keep hearing the audio normally. Needs the "System Audio Recording Only"
+/// permission (see AudioCapturePermission).
 @MainActor @Observable
 final class SystemAudioRecorder {
     private(set) var isRecording = false
@@ -26,6 +29,8 @@ final class SystemAudioRecorder {
     private(set) var level: Float = 0
     /// True once real (non-silent) audio has arrived during this recording.
     private(set) var heardSound = false
+    /// Set by stop() if any audio couldn't be written to the file.
+    private(set) var writeError: Error?
 
     private var session: TapSession?
     private var timer: Timer?
@@ -45,6 +50,7 @@ final class SystemAudioRecorder {
         self.session = session
         isRecording = true
         heardSound = false
+        writeError = nil
         elapsed = 0
         startDate = Date()
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
@@ -55,12 +61,13 @@ final class SystemAudioRecorder {
         }
     }
 
-    /// Stops and returns the recorded duration in seconds.
+    /// Stops, finalises the file and returns its duration in seconds.
     @discardableResult
     func stop() -> TimeInterval {
         timer?.invalidate()
         timer = nil
         let duration = session?.stop() ?? 0
+        writeError = session?.writeError
         session = nil
         isRecording = false
         level = 0
@@ -97,6 +104,8 @@ private final class TapSession: @unchecked Sendable {
     private let lock = NSLock()
     private var lastCallback: UInt64 = 0
     private var framesWritten: AVAudioFramePosition = 0
+    /// The first write failure, if any (writer-queue state; read after stop()).
+    private(set) var writeError: Error?
 
     private let ioQueue = DispatchQueue(label: "earshot.tap.io", qos: .userInitiated)
     private let writeQueue = DispatchQueue(label: "earshot.tap.write", qos: .utility)
@@ -236,7 +245,7 @@ private final class TapSession: @unchecked Sendable {
             guard hostSeconds(from: last, to: mach_absolute_time()) > 0.5 else { return }
             // The device stopped calling us. Rebuild it around the same tap.
             self.stopDevice()
-            do { try self.startDevice() } catch { NSLog("Earshot: restarting capture failed: \(error)") }
+            do { try self.startDevice() } catch { log.error("Restarting capture failed: \(error.localizedDescription, privacy: .public)") }
         }
         timer.resume()
         watchdog = timer
@@ -306,7 +315,8 @@ private final class TapSession: @unchecked Sendable {
                 try file.write(from: buffer)
                 self.framesWritten += AVAudioFramePosition(buffer.frameLength)
             } catch {
-                NSLog("Earshot: write failed: \(error)")
+                log.error("Writing audio failed: \(error.localizedDescription, privacy: .public)")
+                if self.writeError == nil { self.writeError = error }
             }
         }
     }
